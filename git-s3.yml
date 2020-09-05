@@ -1,0 +1,162 @@
+#6. Copy the github repo code into /var/www/html
+#7. Create S3 bucket, and copy/deploy the images from github repo into the s3 bucket and change the permission to public readable.
+#8 Create a Cloudfront using s3 bucket(which contains images) and use the
+#Cloudfront URL to update in code in /var/www/html
+#
+#
+provider "aws" {
+  region = "ap-south-1"
+  profile = "pawan"
+}
+resource "aws_s3_bucket" "my-s3-by-terraform" {
+  bucket = "my-s3-by-terraform"
+  tags = {
+    Name = "my-s3-by-terraform"
+  }
+}
+resource "aws_cloudfront_distribution" "s3_distribution" {
+  origin {
+    domain_name ="${aws_s3_bucket.my-s3-by-terraform.bucket_regional_domain_name}"
+    origin_id ="${aws_s3_bucket.my-s3-by-terraform.id}"
+  }
+  enabled = true
+  is_ipv6_enabled = true
+  comment = "S3 bucket"
+  default_cache_behavior {
+    allowed_methods = ["DELETE", "GET", "HEAD", "OPTIONS","PATCH", "POST", "PUT"]
+    cached_methods = ["GET", "HEAD"]
+    target_origin_id = "${aws_s3_bucket.my-s3-by-terraform.id}"
+    forwarded_values {
+      query_string = false
+      cookies {
+        forward = "none"
+      }
+    }
+    viewer_protocol_policy = "allow-all"
+    min_ttl = 0
+    default_ttl = 3600
+    max_ttl = 86400
+  }
+# Cache behavior with precedence 0
+  ordered_cache_behavior {
+    path_pattern = "/content/immutable/*"
+    allowed_methods = ["GET", "HEAD", "OPTIONS"]
+    cached_methods = ["GET", "HEAD", "OPTIONS"]
+    target_origin_id = "${aws_s3_bucket.my-s3-by-terraform.id}"
+    forwarded_values {
+      query_string = false
+      cookies {
+        forward = "none"
+      }
+    }
+    min_ttl = 0
+    default_ttl = 86400
+    max_ttl = 31536000
+    compress = true
+    viewer_protocol_policy = "redirect-to-https"
+  }
+  restrictions {
+    geo_restriction {
+      restriction_type = "whitelist"
+      locations = ["IN"]
+      }
+    }
+  tags = {
+    Environment = "production"
+  }
+  viewer_certificate {
+    cloudfront_default_certificate = true
+  }
+  depends_on = [ aws_s3_bucket.my-s3-by-terraform ]
+}
+resource "aws_iam_role" "codepipeline_role" {
+  name = "task"
+  assume_role_policy = <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "codepipeline.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+EOF
+}
+
+resource "aws_iam_role_policy" "codepipeline_policy" {
+  name = "codepipeline_policy"
+  role = "${aws_iam_role.codepipeline_role.id}"
+  policy = <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect":"Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:GetBucketVersioning",
+        "s3:PutObject"
+      ],
+      "Resource": [
+        "${aws_s3_bucket.my-s3-by-terraform.arn}",
+        "${aws_s3_bucket.my-s3-by-terraform.arn}/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "codebuild:BatchGetBuilds",
+        "codebuild:StartBuild"
+       ],
+      "Resource": "*"
+    }
+  ]
+}
+EOF
+}
+resource "aws_codepipeline" "codepipeline" {
+  name = "code-pipeline"
+  role_arn = "${aws_iam_role.codepipeline_role.arn}"
+  artifact_store {
+    location = "${aws_s3_bucket.my-s3-by-terraform.bucket}"
+    type = "S3"
+  }
+  stage {
+    name = "Source"
+    action {
+      name = "Source"
+      category = "Source"
+      owner = "ThirdParty"
+      provider = "GitHub"
+      version = "1"
+      output_artifacts = ["SourceArtifacts"]
+      configuration = {
+        Owner = "pawankulaura"
+        Repo = "hybridmulticloud-task1"
+        Branch = "master"
+        OAuthToken = "***********************"
+      }
+    }
+  }
+  stage {
+    name = "Deploy"
+    action {
+      name = "Deploy"
+      category = "Deploy"
+      owner = "AWS"
+      provider = "S3"
+      version = "1"
+      input_artifacts = ["SourceArtifacts"]
+      configuration = {
+        BucketName = "${aws_s3_bucket.my-s3-by-terraform.bucket}"
+        Extract = "true"
+      }
+    }
+  }
+}
+
